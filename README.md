@@ -163,6 +163,8 @@ npm run dev -- --open
 
 The repo includes [CI scripts](https://aws.amazon.com/devops/continuous-integration/) designed for [GitHub Actions](https://github.com/features/actions). These confirm you don’t break your [build](https://github.com/CriticalMoments/CMSaasStarter/blob/main/.github/workflows/build.yml), you use [proper code formatting](https://github.com/CriticalMoments/CMSaasStarter/blob/main/.github/workflows/format.yml), [code linting and typechecking passes](https://github.com/CriticalMoments/CMSaasStarter/blob/main/.github/workflows/linting.yml), and even spell checking.
 
+Pull requests that change `supabase/migrations/*.sql` or the new-install schema in `database_migration.sql` also run [RattleCheck](./.github/workflows/rattlecheck.yml). The check flags high or critical permission findings that are new, changed, or more severe than on the base branch. Run `npx rattlecheck@latest` from the project root to review the migration history locally. No Supabase credentials are needed.
+
 ### Enabling GitHub Actions
 
 Github disables CI on new forks by default, so be sure to go into the Github Actions page for your repo and enable workflows.

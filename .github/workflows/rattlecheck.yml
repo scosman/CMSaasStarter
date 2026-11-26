@@ -1,0 +1,99 @@
+name: Supabase migration review
+
+on:
+  pull_request:
+    paths:
+      - "supabase/migrations/*.sql"
+      - "database_migration.sql"
+      - "supabase/config.toml"
+      - "rattlecheck.config.json"
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    name: RattleCheck (${{ matrix.schema }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - schema: migration history
+            files: /supabase/migrations/*.sql
+          - schema: new installs
+            files: /database_migration.sql
+    steps:
+      - name: Check out base SQL
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: base
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            ${{ matrix.files }}
+            /supabase/config.toml
+            /rattlecheck.config.json
+
+      - name: Check out proposed SQL
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          path: proposed
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            ${{ matrix.files }}
+            /supabase/config.toml
+            /rattlecheck.config.json
+
+      - name: Check for new permission findings
+        working-directory: ${{ runner.temp }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$GITHUB_WORKSPACE/base"
+          proposed="$GITHUB_WORKSPACE/proposed"
+          if diff -qr --no-dereference --exclude=.git "$base" "$proposed" >/dev/null; then
+            echo "No changes to this schema."
+            exit 0
+          fi
+          if [[ -n "$(find "$base" "$proposed" -name .git -prune -o -type l -print -quit)" ]]; then
+            echo "Only regular SQL and configuration files can be reviewed."
+            exit 1
+          fi
+
+          npm install --prefix "$RUNNER_TEMP/checker" --registry=https://registry.npmjs.org/ --ignore-scripts --no-audit --no-fund --no-package-lock rattlecheck@latest
+          cli="$RUNNER_TEMP/checker/node_modules/rattlecheck/bin/rattlecheck.js"
+          for side in base proposed; do
+            tree="$GITHUB_WORKSPACE/$side"
+            if [[ "$side" == base && -z "$(find "$tree" -name .git -prune -o -name '*.sql' -print -quit)" ]]; then
+              echo '{"findings":[]}' > base.json
+              continue
+            fi
+            status=0
+            node "$cli" "$tree" --json --out "$side.json" >/dev/null || status=$?
+            # Exit 1 is a report with findings. A previously empty base is valid.
+            if (( status > 1 )) && [[ "$side:$status" != base:3 ]]; then
+              echo "RattleCheck could not cover the $side schema (exit $status)."
+              exit "$status"
+            fi
+            jq -e '.schema == "rattlecheck.report/v1" and (.findings | type == "array")' "$side.json" >/dev/null
+          done
+          if ! jq -e '.coverage.ok == true and .doors.checked > 0' proposed.json >/dev/null; then
+            echo "No reviewable objects found in the proposed schema."
+            exit 1
+          fi
+
+          jq -n --slurpfile base base.json --slurpfile proposed proposed.json '
+            def rank: {"high": 1, "critical": 2}[.severity // ""] // 0;
+            def key: [.rule, .object, .name, .detail, .message] | tojson;
+            INDEX($base[0].findings[]; key) as $prior |
+            [$proposed[0].findings[] | select(rank > ($prior[key] | rank)) |
+              {rule, severity, title, name, file, line}]
+          ' > new-findings.json
+          jq -r '"RattleCheck \(.tool.version) checked \(.doors.checked) objects in the proposed schema."' proposed.json
+          jq -r '"New high or critical findings: \(length)"' new-findings.json
+          jq -c '.[]' new-findings.json
+          jq -e 'length == 0' new-findings.json >/dev/null
